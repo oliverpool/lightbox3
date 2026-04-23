@@ -516,6 +516,10 @@ export class Lightbox {
   // ─── Event Handlers ──────────────────────────────────────────
 
   private handleClick(e: MouseEvent): void {
+    if (e.ctrlKey || e.shiftKey) {
+      // let the browser handle this
+      return
+    }
     const trigger = (e.target as HTMLElement).closest(this.opts.selector) as HTMLElement | null;
     if (!trigger) return;
     e.preventDefault();
