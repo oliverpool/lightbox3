@@ -7,8 +7,8 @@
   --lb-chrome-font-size: 15px;
   --lb-chrome-padding: 16px;
   --lb-chrome-border-radius: 48px;
-  --lb-image-border-radius: 24px;
-  --lb-image-padding: 40px;
+  --lb-media-border-radius: 24px;
+  --lb-media-padding: 40px;
   --lb-z-index: 999999;
 
   position: fixed;
@@ -42,7 +42,7 @@
   pointer-events: none;
 }
 
-.lightbox3-image {
+.lightbox3-media {
   position: absolute;
   object-fit: cover;
   user-select: none;
@@ -219,8 +219,8 @@
 
 @media (max-width: 600px) {
   .lightbox3-overlay {
-    --lb-image-border-radius: 16px;
-    --lb-image-padding: 8px;
+    --lb-media-border-radius: 16px;
+    --lb-media-padding: 8px;
   }
 
   .lightbox3-arrow {
@@ -253,7 +253,7 @@
 }
 
 @media (prefers-reduced-motion: reduce) {
-  .lightbox3-image,
+  .lightbox3-media,
   .lightbox3-backdrop,
   .lightbox3-spinner {
     transition-duration: 0.01ms !important;

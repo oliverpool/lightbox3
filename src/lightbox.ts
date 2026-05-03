@@ -2,6 +2,9 @@ import { springStep, SPRING_OPEN, SPRING_CLOSE } from './physics/spring';
 import type { SpringConfig, SpringState, SpringStepResult } from './physics/spring';
 // Note: easing.ts is no longer used — all animations are rAF + spring physics
 
+// Prepare for other media types (video, 3D models, etc.)
+export type LightboxMediaElement = HTMLImageElement;
+
 export type LightboxEventType =
   | 'open'
   | 'opened'
@@ -12,13 +15,13 @@ export type LightboxEventType =
   | 'zoomOut';
 
 export interface LightboxEventDetail {
-  /** The full-res image URL */
+  /** The full-res media URL */
   src: string;
   /** The trigger element (anchor or element with data-lightbox) */
   triggerEl: HTMLElement;
-  /** Current index in the gallery (0 for standalone images) */
+  /** Current index in the gallery (0 for standalone media) */
   index: number;
-  /** Total items in the gallery (1 for standalone images) */
+  /** Total items in the gallery (1 for standalone media) */
   total: number;
 }
 
@@ -40,16 +43,16 @@ const DEFAULTS: Required<LightboxOptions> = {
   debug: false,
 };
 
-// Spinner shown while loading an image triggered from a text link.
+// Spinner shown while loading a media item triggered from a text link.
 const SPINNER_DELAY_MS = 300;
 
-// For text-link triggers, the image stays fully opaque until the backdrop
-// drops below this threshold, then fades proportionally. Keeps the image
+// For text-link triggers, the media stays fully opaque until the backdrop
+// drops below this threshold, then fades proportionally. Keeps the media
 // visible through ~80% of the close animation and fades quickly at the end.
 const TEXT_LINK_OPACITY_THRESHOLD = 0.2;
 
-// Default border-radius for lightbox images, read from --lb-image-border-radius.
-const DEFAULT_IMAGE_BORDER_RADIUS = 24;
+// Default border-radius for lightbox media, read from --lb-media-border-radius.
+const DEFAULT_MEDIA_BORDER_RADIUS = 24;
 
 interface LightboxState {
   isOpen: boolean;
@@ -107,7 +110,7 @@ interface VelocitySample {
 interface DismissState {
   tracking: boolean; // Pointer down at scale=1, waiting to determine axis
   active: boolean; // Vertical axis confirmed, dismiss gesture in progress
-  fromOverlay: boolean; // Gesture started on overlay (not image) — tap should close
+  fromOverlay: boolean; // Gesture started on overlay (not media) — tap should close
   startX: number;
   startY: number;
   offsetX: number;
@@ -170,15 +173,15 @@ export class Lightbox {
   // DOM
   private overlay: HTMLDivElement | null = null;
   private backdrop: HTMLDivElement | null = null;
-  private imgEl: HTMLImageElement | null = null;
+  private mediaEl: LightboxMediaElement | null = null;
 
   // Strip DOM (gallery slide container)
   private stripEl: HTMLDivElement | null = null;
   private currentSlideEl: HTMLDivElement | null = null;
   private prevSlideEl: HTMLDivElement | null = null;
-  private prevSlideImg: HTMLImageElement | null = null;
+  private prevSlideMedia: LightboxMediaElement | null = null;
   private nextSlideEl: HTMLDivElement | null = null;
-  private nextSlideImg: HTMLImageElement | null = null;
+  private nextSlideMedia: LightboxMediaElement | null = null;
 
   // Gallery
   private gallery: GalleryItem[] = [];
@@ -192,7 +195,7 @@ export class Lightbox {
   private swipeNav: SwipeNavState = this.defaultSwipeNavState();
 
   // Preload
-  private preloadCache = new Map<string, HTMLImageElement>();
+  private preloadCache = new Map<string, LightboxMediaElement>();
   private preloadTimer: ReturnType<typeof setTimeout> | null = null;
   private preloadQueue: string[] = [];
   private preloadingActive: boolean = false;
@@ -210,7 +213,7 @@ export class Lightbox {
   // Separate rAF for trigger bounce (runs independently after close)
   private bounceRafId: number | null = null;
 
-  // Crop insets for object-fit:cover thumbnail animation (pixels in lightbox image space)
+  // Crop insets for object-fit:cover thumbnail animation (pixels in lightbox media space)
   private cropInsets = { top: 0, right: 0, bottom: 0, left: 0 };
 
   // Border-radius of the thumbnail trigger (px), read on open for close morph
@@ -280,7 +283,7 @@ export class Lightbox {
     this.handleKeydown = this.handleKeydown.bind(this);
     this.handlePointerEnter = this.handlePointerEnter.bind(this);
     this.handlePointerLeave = this.handlePointerLeave.bind(this);
-    this.handleImagePointerDown = this.handleImagePointerDown.bind(this);
+    this.handleMediaPointerDown = this.handleMediaPointerDown.bind(this);
     this.handleOverlayPointerDown = this.handleOverlayPointerDown.bind(this);
     this.handlePointerMove = this.handlePointerMove.bind(this);
     this.handlePointerUp = this.handlePointerUp.bind(this);
@@ -655,20 +658,20 @@ export class Lightbox {
     const natH = fullResReady ? cached!.naturalHeight : thumbNatH;
     // When full-res dimensions are unknown, use thumbnail aspect ratio to fill
     // the viewport. Without this, the "never upscale" cap in computeTargetRect
-    // keeps the image at the thumbnail's small pixel size.
+    // keeps the media at the thumbnail's small pixel size.
     const targetRect = fullResReady
       ? this.computeTargetRect(natW, natH)
       : this.computeTargetRectFromAspectRatio(natW, natH);
 
-    // Place image at final size/position, then FLIP from thumbnail
-    this.positionImage(targetRect);
+    // Place media at final size/position, then FLIP from thumbnail
+    this.positionMedia(targetRect);
 
     this.zoom = this.defaultZoomState();
     this.zoom.fitRect = targetRect;
     this.zoom.naturalWidth = natW;
     this.zoom.naturalHeight = natH;
 
-    // Compute the FLIP transform: what transform makes the image look like it's at thumbRect?
+    // Compute the FLIP transform: what transform makes the media look like it's at thumbRect?
     const flipX = thumbRect.x + thumbRect.width / 2 - (targetRect.x + targetRect.width / 2);
     const flipY = thumbRect.y + thumbRect.height / 2 - (targetRect.y + targetRect.height / 2);
 
@@ -685,8 +688,8 @@ export class Lightbox {
       this.swapToFullRes(src);
     }
 
-    // Preload neighbor images BEFORE populating adjacent slides — this ensures
-    // the preload cache has Image objects that setupSlideImage can attach load
+    // Preload neighbor media BEFORE populating adjacent slides — this ensures
+    // the preload cache has Media objects that setupSlideMedia can attach load
     // listeners to. Without this, adjacent slides fall back to thumbnails because
     // the cache entry doesn't exist yet when the slide is created.
     if (this.gallery.length > 1) {
@@ -721,12 +724,12 @@ export class Lightbox {
     const fullResReady = cached?.complete && cached.naturalWidth > 0;
 
     if (fullResReady) {
-      // Image already loaded — run the normal FLIP morph using image aspect ratio
-      this.openTextLinkWithImage(triggerEl, src, cached!.naturalWidth, cached!.naturalHeight);
+      // Media already loaded — run the normal FLIP morph using media aspect ratio
+      this.openTextLinkWithMedia(triggerEl, src, cached!.naturalWidth, cached!.naturalHeight);
       return;
     }
 
-    // Image not ready — show overlay + spinner, load, then morph
+    // Media not ready — show overlay + spinner, load, then morph
     this.createOverlay('');
     this.createChrome();
     const cx = triggerEl
@@ -737,9 +740,9 @@ export class Lightbox {
       : window.innerHeight / 2;
     this.computeChromeDrift(cx, cy);
     document.addEventListener('keydown', this.handleKeydown);
-    if (this.imgEl) this.imgEl.style.opacity = '0';
+    if (this.mediaEl) this.mediaEl.style.opacity = '0';
 
-    // Show spinner after a short delay (skip if image loads fast)
+    // Show spinner after a short delay (skip if media loads fast)
     this.spinnerTimer = setTimeout(() => {
       if (this.overlay && this.state.currentSrc === src) {
         const spinner = document.createElement('div');
@@ -759,17 +762,17 @@ export class Lightbox {
       undefined,
     );
 
-    // Load image, then run the FLIP morph
-    this.loadImage(src).then((size) => {
-      if (!this.imgEl || this.state.currentSrc !== src) return;
+    // Load media, then run the FLIP morph
+    this.loadMedia(src).then((size) => {
+      if (!this.mediaEl || this.state.currentSrc !== src) return;
       if (this.state.isClosing || !this.state.isOpen) return;
       this.removeSpinner();
-      this.openTextLinkWithImage(triggerEl, src, size.width, size.height);
+      this.openTextLinkWithMedia(triggerEl, src, size.width, size.height);
     });
   }
 
-  /** Run the FLIP morph for a text-link trigger once image dimensions are known. */
-  private openTextLinkWithImage(
+  /** Run the FLIP morph for a text-link trigger once media dimensions are known. */
+  private openTextLinkWithMedia(
     triggerEl: HTMLElement | null,
     src: string,
     natW: number,
@@ -790,17 +793,17 @@ export class Lightbox {
       );
       document.addEventListener('keydown', this.handleKeydown);
     } else {
-      this.imgEl!.src = src;
+      this.mediaEl!.src = src;
     }
 
-    this.positionImage(targetRect);
+    this.positionMedia(targetRect);
 
     this.zoom = this.defaultZoomState();
     this.zoom.fitRect = targetRect;
     this.zoom.naturalWidth = natW;
     this.zoom.naturalHeight = natH;
 
-    // Build a FLIP origin rect centered on the text link but with the image's
+    // Build a FLIP origin rect centered on the text link but with the media's
     // aspect ratio, so the morph scales uniformly instead of stretching.
     const flipRect = this.textLinkFlipRect(thumbRect, natW, natH);
 
@@ -829,7 +832,7 @@ export class Lightbox {
   }
 
   /**
-   * Build a rect centered on the text link with the image's aspect ratio.
+   * Build a rect centered on the text link with the media's aspect ratio.
    * Sized so the shorter dimension matches the text link's height.
    */
   private textLinkFlipRect(linkRect: DOMRect, natW: number, natH: number): DOMRect {
@@ -853,12 +856,12 @@ export class Lightbox {
   }
 
   private swapToFullRes(src: string): void {
-    this.loadImage(src).then((size) => {
-      if (!this.imgEl || this.state.currentSrc !== src) return;
-      // Full-res loaded after close started — don't reposition the image
+    this.loadMedia(src).then((size) => {
+      if (!this.mediaEl || this.state.currentSrc !== src) return;
+      // Full-res loaded after close started — don't reposition the media
       if (this.state.isClosing || !this.state.isOpen) return;
 
-      this.imgEl.src = src;
+      this.mediaEl.src = src;
       this.zoom.naturalWidth = size.width;
       this.zoom.naturalHeight = size.height;
 
@@ -876,7 +879,7 @@ export class Lightbox {
           this.animateFitTransition(currentRect, targetRect);
         } else {
           this.zoom.fitRect = targetRect;
-          this.positionImage(targetRect);
+          this.positionMedia(targetRect);
         }
       }
 
@@ -884,17 +887,17 @@ export class Lightbox {
     });
   }
 
-  /** Spring-animate the image from one fit rect to another (aspect ratio change). */
+  /** Spring-animate the media from one fit rect to another (aspect ratio change). */
   private animateFitTransition(from: DOMRect, to: DOMRect): void {
     this.stopFitTransition();
 
     if (this.reducedMotion) {
       this.zoom.fitRect = to;
-      this.positionImage(to);
+      this.positionMedia(to);
       return;
     }
 
-    const img = this.imgEl!;
+    const media = this.mediaEl!;
     const config = PAN_SPRING; // Soft spring for a gentle settle
     const springs = {
       x: { position: from.x, velocity: 0, settled: false } as SpringStepResult,
@@ -914,7 +917,7 @@ export class Lightbox {
       springs.w = springStep(config, springs.w, to.width, dt);
       springs.h = springStep(config, springs.h, to.height, dt);
 
-      Object.assign(img.style, {
+      Object.assign(media.style, {
         left: `${springs.x.position}px`,
         top: `${springs.y.position}px`,
         width: `${springs.w.position}px`,
@@ -926,7 +929,7 @@ export class Lightbox {
 
       if (settled) {
         this.zoom.fitRect = to;
-        this.positionImage(to);
+        this.positionMedia(to);
         this.fitRafId = null;
         return;
       }
@@ -1001,7 +1004,7 @@ export class Lightbox {
       this.zoom.panY = 0;
       this.zoom.zoomed = false;
       this.zoom.zoomingOut = false;
-      this.imgEl!.style.transform = '';
+      this.mediaEl!.style.transform = '';
     }
 
     this.state.isAnimating = true;
@@ -1043,7 +1046,7 @@ export class Lightbox {
 
     const { fitRect } = this.zoom;
 
-    // For text links, build a target rect with the image's aspect ratio
+    // For text links, build a target rect with the media's aspect ratio
     // centered on the link, instead of morphing to the text's shape.
     const morphRect = this.isTextLink
       ? this.textLinkFlipRect(thumbRect, this.zoom.naturalWidth, this.zoom.naturalHeight)
@@ -1123,7 +1126,7 @@ export class Lightbox {
 
   /**
    * "Catch" bounce: the trigger element squishes down slightly then
-   * springs back to normal scale, as if catching the lightbox image.
+   * springs back to normal scale, as if catching the lightbox media.
    * Runs on its own rAF loop so it doesn't interfere with the main spring.
    */
   private bounceTrigger(el: HTMLElement): void {
@@ -1245,17 +1248,17 @@ export class Lightbox {
     // Recycle DOM slots
     this.recycleSlots(direction);
 
-    // Set up new current image (zoom state, full-res swap)
-    this.setupCurrentImage();
+    // Set up new current media (zoom state, full-res swap)
+    this.setupCurrentMedia();
 
-    // Wheel navigation: ready for new gesture now that the image has landed
+    // Wheel navigation: ready for new gesture now that the media has landed
     this.wheelNavCommitted = false;
     this.wheelNavTotalDelta = 0;
   }
 
   /**
    * After strip animation completes, reposition slide elements so the new
-   * current image is at left:0. Remove the old far slide, create a new one
+   * current media is at left:0. Remove the old far slide, create a new one
    * at the opposite edge.
    */
   private recycleSlots(direction: 1 | -1): void {
@@ -1266,21 +1269,21 @@ export class Lightbox {
       if (this.prevSlideEl) this.prevSlideEl.remove();
 
       this.prevSlideEl = this.currentSlideEl;
-      this.prevSlideImg = this.imgEl;
+      this.prevSlideMedia = this.mediaEl;
       if (this.prevSlideEl) {
         this.prevSlideEl.style.left = `${-slideWidth}px`;
         this.prevSlideEl.style.pointerEvents = 'none';
       }
 
       this.currentSlideEl = this.nextSlideEl;
-      this.imgEl = this.nextSlideImg;
+      this.mediaEl = this.nextSlideMedia;
       if (this.currentSlideEl) {
         this.currentSlideEl.style.left = '0';
         this.currentSlideEl.style.pointerEvents = 'auto';
       }
 
       this.nextSlideEl = null;
-      this.nextSlideImg = null;
+      this.nextSlideMedia = null;
       if (this.currentIndex < this.gallery.length - 1) {
         this.createAdjacentSlide(this.currentIndex + 1, slideWidth);
       }
@@ -1289,54 +1292,54 @@ export class Lightbox {
       if (this.nextSlideEl) this.nextSlideEl.remove();
 
       this.nextSlideEl = this.currentSlideEl;
-      this.nextSlideImg = this.imgEl;
+      this.nextSlideMedia = this.mediaEl;
       if (this.nextSlideEl) {
         this.nextSlideEl.style.left = `${slideWidth}px`;
         this.nextSlideEl.style.pointerEvents = 'none';
       }
 
       this.currentSlideEl = this.prevSlideEl;
-      this.imgEl = this.prevSlideImg;
+      this.mediaEl = this.prevSlideMedia;
       if (this.currentSlideEl) {
         this.currentSlideEl.style.left = '0';
         this.currentSlideEl.style.pointerEvents = 'auto';
       }
 
       this.prevSlideEl = null;
-      this.prevSlideImg = null;
+      this.prevSlideMedia = null;
       if (this.currentIndex > 0) {
         this.createAdjacentSlide(this.currentIndex - 1, -slideWidth);
       }
     }
   }
 
-  /** Set up zoom state and image src for the newly-centered current image. */
-  private setupCurrentImage(): void {
+  /** Set up zoom state and media src for the newly-centered current media. */
+  private setupCurrentMedia(): void {
     this.zoom = this.defaultZoomState();
     this.stopFitTransition();
 
     const item = this.gallery[this.currentIndex];
-    if (!item || !this.imgEl) return;
+    if (!item || !this.mediaEl) return;
 
     // Check preload cache first
     const cached = this.preloadCache.get(item.src);
     const fullResReady = cached?.complete && cached.naturalWidth > 0;
 
-    // Also check if the slide's img element already has full-res loaded
+    // Also check if the slide's media element already has full-res loaded
     // (e.g. preload finished during strip animation and upgraded the adjacent slide)
-    const imgHasFullRes =
-      this.imgEl.src === item.src &&
-      this.imgEl.complete &&
-      this.imgEl.naturalWidth > 0;
+    const mediaHasFullRes =
+      this.mediaEl.src === item.src &&
+      this.mediaEl.complete &&
+      this.mediaEl.naturalWidth > 0;
 
-    if (fullResReady || imgHasFullRes) {
-      const natW = fullResReady ? cached!.naturalWidth : this.imgEl.naturalWidth;
-      const natH = fullResReady ? cached!.naturalHeight : this.imgEl.naturalHeight;
+    if (fullResReady || mediaHasFullRes) {
+      const natW = fullResReady ? cached!.naturalWidth : this.mediaEl.naturalWidth;
+      const natH = fullResReady ? cached!.naturalHeight : this.mediaEl.naturalHeight;
       this.zoom.naturalWidth = natW;
       this.zoom.naturalHeight = natH;
       this.zoom.fitRect = this.computeTargetRect(natW, natH);
-      this.imgEl.src = item.src;
-      this.positionImage(this.zoom.fitRect);
+      this.mediaEl.src = item.src;
+      this.positionMedia(this.zoom.fitRect);
     } else {
       const thumbImg = item.triggerEl.querySelector('img') as HTMLImageElement | null;
       const natW = thumbImg?.naturalWidth || 400;
@@ -1344,15 +1347,15 @@ export class Lightbox {
       this.zoom.naturalWidth = natW;
       this.zoom.naturalHeight = natH;
       this.zoom.fitRect = this.computeTargetRectFromAspectRatio(natW, natH);
-      this.positionImage(this.zoom.fitRect);
+      this.positionMedia(this.zoom.fitRect);
       this.swapToFullRes(item.src);
     }
 
-    // Apply border-radius to the new current image (previous image had it from
+    // Apply border-radius to the new current media (previous media had it from
     // the open animation, but this is a fresh DOM element after slot recycling).
     const br = this.getTargetBorderRadius();
-    if (this.imgEl) {
-      this.imgEl.style.borderRadius = br > 0 ? `${br}px` : '';
+    if (this.mediaEl) {
+      this.mediaEl.style.borderRadius = br > 0 ? `${br}px` : '';
     }
 
     this.updateCursorState();
@@ -1397,11 +1400,11 @@ export class Lightbox {
   ): void {
     this.stopSpring();
 
-    const img = this.imgEl!;
+    const media = this.mediaEl!;
     const backdrop = this.backdrop!;
 
     if (this.reducedMotion) {
-      this.applyAnimState(img, backdrop, to);
+      this.applyAnimState(media, backdrop, to);
       onComplete();
       return;
     }
@@ -1455,7 +1458,7 @@ export class Lightbox {
     let firedEarlyComplete = false;
 
     // Apply initial state
-    this.applyAnimState(img, backdrop, from);
+    this.applyAnimState(media, backdrop, from);
 
     const tick = (now: number) => {
       const dt = Math.min((now - lastTime) / 1000, 0.064);
@@ -1472,7 +1475,7 @@ export class Lightbox {
       }
 
       const currentState = current as unknown as AnimState;
-      this.applyAnimState(img, backdrop, currentState);
+      this.applyAnimState(media, backdrop, currentState);
 
       // onEarlyComplete: fire onComplete early but keep the spring running
       // (used by open animation to unblock interaction while bounce continues)
@@ -1483,7 +1486,7 @@ export class Lightbox {
 
       if (allSettled || earlyComplete?.(currentState)) {
         // Snap to exact final values
-        this.applyAnimState(img, backdrop, to);
+        this.applyAnimState(media, backdrop, to);
         this.debugLog(`mainRaf settled${earlyComplete?.(currentState) ? ' (early)' : ''}`);
         this.rafId = null;
         if (!firedEarlyComplete) onComplete();
@@ -1496,38 +1499,38 @@ export class Lightbox {
     this.rafId = requestAnimationFrame(tick);
   }
 
-  private applyAnimState(img: HTMLImageElement, backdrop: HTMLDivElement, state: AnimState): void {
-    img.style.transform = `translate(${state.translateX}px, ${state.translateY}px) scale(${state.scale})`;
+  private applyAnimState(media: LightboxMediaElement, backdrop: HTMLDivElement, state: AnimState): void {
+    media.style.transform = `translate(${state.translateX}px, ${state.translateY}px) scale(${state.scale})`;
     backdrop.style.opacity = String(state.opacity);
 
     if (this.isTextLink) {
-      img.style.opacity = String(Math.min(1, state.opacity / TEXT_LINK_OPACITY_THRESHOLD));
+      media.style.opacity = String(Math.min(1, state.opacity / TEXT_LINK_OPACITY_THRESHOLD));
     } else if (this.state.isClosing && !this.state.isDismissClosing && window.innerWidth <= 600) {
-      // Mobile: thumbnail stays visible during close, so fade the image in
+      // Mobile: thumbnail stays visible during close, so fade the media in
       // the final stretch to ease the handoff rather than snapping away.
-      const CLOSE_IMG_FADE = 0.02;
-      img.style.opacity = state.opacity < CLOSE_IMG_FADE
-        ? String(state.opacity / CLOSE_IMG_FADE)
+      const CLOSE_MEDIA_FADE = 0.02;
+      media.style.opacity = state.opacity < CLOSE_MEDIA_FADE
+        ? String(state.opacity / CLOSE_MEDIA_FADE)
         : '';
     } else {
-      img.style.opacity = '';
+      media.style.opacity = '';
     }
 
     if (state.crop > 0.001) {
       const { top, right, bottom, left } = this.cropInsets;
       const br = state.borderRadius > 0.1 ? state.borderRadius / Math.max(state.scale, 0.01) : 0;
-      img.style.clipPath = `inset(${state.crop * top}px ${state.crop * right}px ${state.crop * bottom}px ${state.crop * left}px round ${br}px)`;
+      media.style.clipPath = `inset(${state.crop * top}px ${state.crop * right}px ${state.crop * bottom}px ${state.crop * left}px round ${br}px)`;
     } else {
-      img.style.clipPath = '';
+      media.style.clipPath = '';
     }
 
     // Border-radius: compensate for FLIP scale so visual radius matches the
     // animated value. When clipPath is active it handles rounding via `round`.
     if (state.crop <= 0.001) {
       const br = state.borderRadius > 0.1 ? state.borderRadius / Math.max(state.scale, 0.01) : 0;
-      img.style.borderRadius = br > 0.1 ? `${br}px` : '';
+      media.style.borderRadius = br > 0.1 ? `${br}px` : '';
     } else {
-      img.style.borderRadius = '';
+      media.style.borderRadius = '';
     }
 
     // Chrome follows backdrop opacity during open/close.
@@ -1606,7 +1609,7 @@ export class Lightbox {
   }
 
   /**
-   * Cross-fade caption and counter as the strip slides between images.
+   * Cross-fade caption and counter as the strip slides between media.
    * Opacity follows a V-curve: 1 → 0 at midpoint → 1.
    * Text content swaps at the midpoint so the new caption fades in.
    */
@@ -1662,8 +1665,8 @@ export class Lightbox {
   /**
    * Rubber-band bounce at gallery edges. Kicks the strip with velocity in the
    * attempted direction — the spring overshoots then settles back to 0,
-   * hinting that there are no more images that way.
-   * direction: 1 = shift right (at first image), -1 = shift left (at last).
+   * hinting that there are no more media items that way.
+   * direction: 1 = shift right (at first item), -1 = shift left (at last).
    */
   private bounceStrip(direction: 1 | -1): void {
     this.debugLog(`bounceStrip(${direction > 0 ? 'right' : 'left'})`);
@@ -1713,7 +1716,7 @@ export class Lightbox {
   }
 
   private zoomIn(clickX: number, clickY: number): void {
-    if (!this.imgEl || !this.isZoomable()) return;
+    if (!this.mediaEl || !this.isZoomable()) return;
     this.debugLog('zoomIn');
     this.emit('zoomIn');
 
@@ -1724,10 +1727,10 @@ export class Lightbox {
     const { fitRect } = this.zoom;
     const targetScale = this.getTapZoomScale();
 
-    const imgCenterX = fitRect.x + fitRect.width / 2;
-    const imgCenterY = fitRect.y + fitRect.height / 2;
-    const relX = clickX - imgCenterX;
-    const relY = clickY - imgCenterY;
+    const mediaCenterX = fitRect.x + fitRect.width / 2;
+    const mediaCenterY = fitRect.y + fitRect.height / 2;
+    const relX = clickX - mediaCenterX;
+    const relY = clickY - mediaCenterY;
 
     let panX = -(relX * targetScale - relX);
     let panY = -(relY * targetScale - relY);
@@ -1807,7 +1810,7 @@ export class Lightbox {
   }
 
   private zoomOut(): void {
-    if (!this.imgEl) return;
+    if (!this.mediaEl) return;
     this.debugLog('zoomOut');
     this.emit('zoomOut');
 
@@ -1897,7 +1900,7 @@ export class Lightbox {
 
   // ─── Pan: drag + momentum via rAF spring ────────────────────
 
-  private handleImagePointerDown(e: PointerEvent): void {
+  private handleMediaPointerDown(e: PointerEvent): void {
     e.preventDefault();
 
     // Add to pointer cache
@@ -1911,7 +1914,7 @@ export class Lightbox {
     }
 
     // Single pointer at fit scale — track for potential swipe-to-dismiss or swipe-to-navigate.
-    // Block during open animation (isAnimating=true) — the image is mid-FLIP
+    // Block during open animation (isAnimating=true) — the media is mid-FLIP
     // and freezing it would leave a partial-open state. Snap-back doesn't set
     // isAnimating, so it stays interruptible.
     // Use !zoomed rather than scale<=1: during zoom-out spring tail, scale may
@@ -1926,7 +1929,7 @@ export class Lightbox {
 
       // Cancel any in-progress animation (e.g. snap-back, zoom-out spring)
       this.stopSpring();
-      // Snap to fit scale so the image is exactly at rest
+      // Snap to fit scale so the media is exactly at rest
       this.zoom.scale = 1;
       this.zoom.panX = 0;
       this.zoom.panY = 0;
@@ -1961,8 +1964,8 @@ export class Lightbox {
   }
 
   private handleOverlayPointerDown(e: PointerEvent): void {
-    // Only handle pointers that land outside the image (backdrop area)
-    if (e.target === this.imgEl) return;
+    // Only handle pointers that land outside the media (backdrop area)
+    if (e.target === this.mediaEl) return;
 
     // Don't intercept clicks on chrome UI (caption links, buttons, etc.)
     if (this.chromeBar && this.chromeBar.contains(e.target as Node)) return;
@@ -2001,7 +2004,7 @@ export class Lightbox {
   }
 
   private handlePointerMove(e: PointerEvent): void {
-    if (!this.imgEl) return;
+    if (!this.mediaEl) return;
 
     // Update pointer in cache
     const idx = this.pointerCache.findIndex((p) => p.pointerId === e.pointerId);
@@ -2084,13 +2087,13 @@ export class Lightbox {
 
     const wasDrag = this.zoom.dragMoved;
     this.zoom.isDragging = false;
-    // Don't clear dragMoved here — handleImageClick needs it to suppress the click
+    // Don't clear dragMoved here — handleMediaClick needs it to suppress the click
     this.updateCursorState();
 
     if (!wasDrag) {
       this.zoomOut();
       // Mark dragMoved so the subsequent click event is suppressed —
-      // without this, handleImageClick also calls zoomOut() on the same tap.
+      // without this, handleMediaClick also calls zoomOut() on the same tap.
       this.zoom.dragMoved = true;
       return;
     }
@@ -2178,9 +2181,9 @@ export class Lightbox {
   }
 
   private applyDismissTransform(): void {
-    if (!this.imgEl || !this.backdrop) return;
+    if (!this.mediaEl || !this.backdrop) return;
     const { offsetX, offsetY, scale } = this.dismiss;
-    this.imgEl.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
+    this.mediaEl.style.transform = `translate(${offsetX}px, ${offsetY}px) scale(${scale})`;
     this.backdrop.style.opacity = String(this.dismiss.opacity);
 
     this.chromeBaseOpacity = this.dismiss.opacity;
@@ -2191,7 +2194,7 @@ export class Lightbox {
     if (!this.dismiss.active) {
       // Was just tracking, never activated.
       // Overlay-initiated: pointer capture suppresses the backdrop click, so close here.
-      // Image-initiated: let the click handler deal with it.
+      // Media-initiated: let the click handler deal with it.
       const fromOverlay = this.dismiss.fromOverlay;
       this.dismiss = this.defaultDismissState();
       if (fromOverlay) this.close();
@@ -2201,7 +2204,7 @@ export class Lightbox {
     const { vx, vy } = this.computeVelocity();
 
     // iOS-style: dismiss is the default once the gesture activates.
-    // Snap back only if the user deliberately returned the image to center.
+    // Snap back only if the user deliberately returned the media to center.
     const dist = Math.hypot(this.dismiss.offsetX, this.dismiss.offsetY);
     const speed = Math.hypot(vx, vy);
 
@@ -2245,7 +2248,7 @@ export class Lightbox {
       return;
     }
 
-    // FLIP morph back to thumbnail (or text-link rect with image aspect ratio)
+    // FLIP morph back to thumbnail (or text-link rect with media aspect ratio)
     const { fitRect } = this.zoom;
     const morphRect = this.isTextLink
       ? this.textLinkFlipRect(thumbRect, this.zoom.naturalWidth, this.zoom.naturalHeight)
@@ -2261,8 +2264,8 @@ export class Lightbox {
       this.isTextLink,
     );
 
-    // Clean up as soon as the image is visually at the thumbnail — the swap
-    // from animated image → real thumbnail is imperceptible at this point.
+    // Clean up as soon as the media is visually at the thumbnail — the swap
+    // from animated media → real thumbnail is imperceptible at this point.
     // Don't use opacity alone: it may already be near 0 from the drag.
     // Tolerances are wide enough to survive spring overshoot from fast flicks
     // (at thumbnail scale, 20px of position error is a few pixels on screen).
@@ -2313,7 +2316,7 @@ export class Lightbox {
 
     // Don't set isAnimating — snap-back is visual recovery, not a state
     // transition. This keeps it interruptible by a new dismiss gesture
-    // (the user can grab the image mid-snap-back) while isAnimating=true
+    // (the user can grab the media mid-snap-back) while isAnimating=true
     // during the open animation correctly blocks dismiss tracking.
     const targetBR = this.getTargetBorderRadius();
     this.animateSpring(
@@ -2603,12 +2606,12 @@ export class Lightbox {
 
     // Focal-point correction: keep the midpoint pinned to the same content
     const { fitRect } = this.zoom;
-    const imgCenterX = fitRect.x + fitRect.width / 2;
-    const imgCenterY = fitRect.y + fitRect.height / 2;
+    const mediaCenterX = fitRect.x + fitRect.width / 2;
+    const mediaCenterY = fitRect.y + fitRect.height / 2;
 
-    // Vector from image center to initial midpoint in screen space
-    const relX = this.pinch.initialMidX - imgCenterX;
-    const relY = this.pinch.initialMidY - imgCenterY;
+    // Vector from media center to initial midpoint in screen space
+    const relX = this.pinch.initialMidX - mediaCenterX;
+    const relY = this.pinch.initialMidY - mediaCenterY;
 
     // Pan offset so that content under the initial midpoint stays under the current midpoint
     const scaleRatio = newScale / this.pinch.initialScale;
@@ -2786,7 +2789,7 @@ export class Lightbox {
     this.zoom.panY = 0;
     this.zoom.zoomed = false;
 
-    // Animate snap-back: image returns to center, backdrop restores.
+    // Animate snap-back: media returns to center, backdrop restores.
     // Don't set isAnimating so snap-back stays interruptible.
     const targetBR = this.getTargetBorderRadius();
     this.animateSpring(
@@ -2941,8 +2944,8 @@ export class Lightbox {
   }
 
   private applyPanTransform(): void {
-    if (!this.imgEl) return;
-    this.imgEl.style.transform = `translate(${this.zoom.panX}px, ${this.zoom.panY}px) scale(${this.zoom.scale})`;
+    if (!this.mediaEl) return;
+    this.mediaEl.style.transform = `translate(${this.zoom.panX}px, ${this.zoom.panY}px) scale(${this.zoom.scale})`;
   }
 
   private computePanBounds(scale: number): {
@@ -2961,16 +2964,16 @@ export class Lightbox {
     return { minX: -overflowX, maxX: overflowX, minY: -overflowY, maxY: overflowY };
   }
 
-  // ─── Image click handler ─────────────────────────────────────
+  // ─── Media click handler ─────────────────────────────────────
 
-  private handleImageClick(e: MouseEvent): void {
+  private handleMediaClick(e: MouseEvent): void {
     if (this.zoom.dragMoved) {
       this.zoom.dragMoved = false;
       return;
     }
 
     // If a strip animation is in progress, complete it so zoom state is valid
-    // for the newly-current image before processing the click.
+    // for the newly-current media before processing the click.
     if (this.pendingNavDirection !== null) {
       this.forceCompleteStripAnimation();
     }
@@ -2991,16 +2994,16 @@ export class Lightbox {
   // ─── Cursor state ────────────────────────────────────────────
 
   private updateCursorState(): void {
-    if (!this.imgEl) return;
-    const img = this.imgEl;
+    if (!this.mediaEl) return;
+    const media = this.mediaEl;
     if (this.zoom.isDragging) {
-      img.style.cursor = 'grabbing';
+      media.style.cursor = 'grabbing';
     } else if (this.zoom.zoomed) {
-      img.style.cursor = 'grab';
+      media.style.cursor = 'grab';
     } else if (this.isZoomable()) {
-      img.style.cursor = 'zoom-in';
+      media.style.cursor = 'zoom-in';
     } else {
-      img.style.cursor = 'pointer';
+      media.style.cursor = 'pointer';
     }
   }
 
@@ -3067,7 +3070,7 @@ export class Lightbox {
     if (isGallery) {
       const prev = document.createElement('button');
       prev.className = 'lightbox3-arrow lightbox3-arrow-prev';
-      prev.setAttribute('aria-label', 'Previous image');
+      prev.setAttribute('aria-label', 'Previous item');
       prev.type = 'button';
       prev.innerHTML =
         '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="12,4 6,10 12,16"/></svg>';
@@ -3082,7 +3085,7 @@ export class Lightbox {
 
       const next = document.createElement('button');
       next.className = 'lightbox3-arrow lightbox3-arrow-next';
-      next.setAttribute('aria-label', 'Next image');
+      next.setAttribute('aria-label', 'Next item');
       next.type = 'button';
       next.innerHTML =
         '<svg viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="8,4 14,10 8,16"/></svg>';
@@ -3322,7 +3325,7 @@ export class Lightbox {
     strip.className = 'lightbox3-strip';
 
     // Center slide
-    const { slide, img } = this.createSlide(src, this.getCurrentAlt());
+    const { slide, media } = this.createSlide(src, this.getCurrentAlt());
     slide.style.left = '0';
     slide.style.pointerEvents = 'auto';
 
@@ -3342,27 +3345,27 @@ export class Lightbox {
     this.backdrop = backdrop;
     this.stripEl = strip;
     this.currentSlideEl = slide;
-    this.imgEl = img;
+    this.mediaEl = media;
   }
 
-  private createSlide(src: string, alt = ''): { slide: HTMLDivElement; img: HTMLImageElement } {
+  private createSlide(src: string, alt = ''): { slide: HTMLDivElement; media: LightboxMediaElement } {
     const slide = document.createElement('div');
     slide.className = 'lightbox3-slide';
 
-    const img = document.createElement('img');
-    img.className = 'lightbox3-image';
-    if (src) img.src = src;
-    img.alt = alt;
-    img.draggable = false;
+    const media = document.createElement('img');
+    media.className = 'lightbox3-media';
+    if (src) media.src = src;
+    media.alt = alt;
+    media.draggable = false;
 
-    img.addEventListener('click', (e) => this.handleImageClick(e));
-    img.addEventListener('pointerdown', this.handleImagePointerDown);
-    img.addEventListener('pointermove', this.handlePointerMove);
-    img.addEventListener('pointerup', this.handlePointerUp);
-    img.addEventListener('pointercancel', this.handlePointerUp);
+    media.addEventListener('click', (e) => this.handleMediaClick(e));
+    media.addEventListener('pointerdown', this.handleMediaPointerDown);
+    media.addEventListener('pointermove', this.handlePointerMove);
+    media.addEventListener('pointerup', this.handlePointerUp);
+    media.addEventListener('pointercancel', this.handlePointerUp);
 
-    slide.appendChild(img);
-    return { slide, img };
+    slide.appendChild(media);
+    return { slide, media };
   }
 
   /** Create and position an adjacent (prev or next) slide in the strip. */
@@ -3371,56 +3374,56 @@ export class Lightbox {
     const item = this.gallery[galleryIndex];
     if (!item) return;
 
-    const { slide, img } = this.createSlide('', item.alt);
+    const { slide, media } = this.createSlide('', item.alt);
     slide.style.left = `${leftPosition}px`;
     slide.style.pointerEvents = 'none';
 
     // Use full-res if already cached, otherwise thumbnail
-    this.setupSlideImage(img, item);
+    this.setupSlideMedia(media, item);
 
     this.stripEl.appendChild(slide);
 
     if (leftPosition < 0) {
       this.prevSlideEl = slide;
-      this.prevSlideImg = img;
+      this.prevSlideMedia = media;
     } else {
       this.nextSlideEl = slide;
-      this.nextSlideImg = img;
+      this.nextSlideMedia = media;
     }
   }
 
-  /** Set the src and position for an adjacent slide's image. */
-  private setupSlideImage(img: HTMLImageElement, item: GalleryItem): void {
+  /** Set the src and position for an adjacent slide's media. */
+  private setupSlideMedia(media: LightboxMediaElement, item: GalleryItem): void {
     const br = this.getTargetBorderRadius();
-    img.style.borderRadius = br > 0 ? `${br}px` : '';
+    media.style.borderRadius = br > 0 ? `${br}px` : '';
     const cached = this.preloadCache.get(item.src);
     const fullResReady = cached?.complete && cached.naturalWidth > 0;
 
     if (fullResReady) {
-      img.src = item.src;
+      media.src = item.src;
       const rect = this.computeTargetRect(cached!.naturalWidth, cached!.naturalHeight);
-      this.positionImageEl(img, rect);
+      this.positionMediaEl(media, rect);
     } else {
-      img.src = item.thumbSrc || item.src;
+      media.src = item.thumbSrc || item.src;
       const thumbImg = item.triggerEl.querySelector('img') as HTMLImageElement | null;
       const natW = thumbImg?.naturalWidth || 400;
       const natH = thumbImg?.naturalHeight || 300;
       const rect = this.computeTargetRectFromAspectRatio(natW, natH);
-      this.positionImageEl(img, rect);
+      this.positionMediaEl(media, rect);
 
       // If preload is in progress, upgrade this slide as soon as it completes
       if (cached && !cached.complete) {
         const onLoad = () => {
           cached.removeEventListener('load', onLoad);
           if (this.state.isClosing || !this.state.isOpen) return;
-          // Only upgrade if this img is still an adjacent slide (not yet current)
+          // Only upgrade if this media is still an adjacent slide (not yet current)
           if (
-            (img === this.prevSlideImg || img === this.nextSlideImg) &&
+            (media === this.prevSlideMedia || media === this.nextSlideMedia) &&
             cached.naturalWidth > 0
           ) {
-            img.src = item.src;
+            media.src = item.src;
             const fullRect = this.computeTargetRect(cached.naturalWidth, cached.naturalHeight);
-            this.positionImageEl(img, fullRect);
+            this.positionMediaEl(media, fullRect);
           }
         };
         cached.addEventListener('load', onLoad);
@@ -3428,9 +3431,9 @@ export class Lightbox {
     }
   }
 
-  /** Position an image element at the given rect. */
-  private positionImageEl(img: HTMLImageElement, rect: DOMRect): void {
-    Object.assign(img.style, {
+  /** Position a media element at the given rect. */
+  private positionMediaEl(media: LightboxMediaElement, rect: DOMRect): void {
+    Object.assign(media.style, {
       left: `${rect.x}px`,
       top: `${rect.y}px`,
       width: `${rect.width}px`,
@@ -3456,13 +3459,13 @@ export class Lightbox {
       this.overlay.remove();
       this.overlay = null;
       this.backdrop = null;
-      this.imgEl = null;
+      this.mediaEl = null;
       this.stripEl = null;
       this.currentSlideEl = null;
       this.prevSlideEl = null;
-      this.prevSlideImg = null;
+      this.prevSlideMedia = null;
       this.nextSlideEl = null;
-      this.nextSlideImg = null;
+      this.nextSlideMedia = null;
       this.chromeBar = null;
       this.chromeCounter = null;
       this.chromeCaption = null;
@@ -3477,9 +3480,9 @@ export class Lightbox {
     }
   }
 
-  private positionImage(rect: DOMRect): void {
-    if (!this.imgEl) return;
-    Object.assign(this.imgEl.style, {
+  private positionMedia(rect: DOMRect): void {
+    if (!this.mediaEl) return;
+    Object.assign(this.mediaEl.style, {
       left: `${rect.x}px`,
       top: `${rect.y}px`,
       width: `${rect.width}px`,
@@ -3489,19 +3492,19 @@ export class Lightbox {
 
   // ─── Helpers ─────────────────────────────────────────────────
 
-  /** Target border-radius for the lightbox image, read from --lb-image-border-radius CSS property. */
+  /** Target border-radius for the lightbox media, read from --lb-media-border-radius CSS property. */
   private getTargetBorderRadius(): number {
     if (this.overlay) {
-      const value = getComputedStyle(this.overlay).getPropertyValue('--lb-image-border-radius');
+      const value = getComputedStyle(this.overlay).getPropertyValue('--lb-media-border-radius');
       if (value) return parseFloat(value) || 0;
     }
-    return DEFAULT_IMAGE_BORDER_RADIUS;
+    return DEFAULT_MEDIA_BORDER_RADIUS;
   }
 
-  /** Viewport padding around the lightbox image, read from --lb-image-padding CSS property. */
-  private getTargetImagePadding(): number {
+  /** Viewport padding around the lightbox media, read from --lb-media-padding CSS property. */
+  private getTargetMediaPadding(): number {
     if (this.overlay) {
-      const value = getComputedStyle(this.overlay).getPropertyValue('--lb-image-padding');
+      const value = getComputedStyle(this.overlay).getPropertyValue('--lb-media-padding');
       if (value) return parseFloat(value) || 0;
     }
     return this.opts.padding;
@@ -3513,25 +3516,25 @@ export class Lightbox {
     // then fall back to the image inside it.
     const elRadius = parseFloat(getComputedStyle(el).borderTopLeftRadius) || 0;
     if (elRadius > 0) return elRadius;
-    const img = el.querySelector('img');
-    return img ? parseFloat(getComputedStyle(img).borderTopLeftRadius) || 0 : 0;
+    const thumbImg = el.querySelector('img');
+    return thumbImg ? parseFloat(getComputedStyle(thumbImg).borderTopLeftRadius) || 0 : 0;
   }
 
   private getThumbRect(el: HTMLElement): DOMRect {
-    const img = el.querySelector('img') as HTMLImageElement | null;
-    if (!img) return el.getBoundingClientRect();
+    const thumbImg = el.querySelector('img') as HTMLImageElement | null;
+    if (!thumbImg) return el.getBoundingClientRect();
 
-    const elRect = img.getBoundingClientRect();
-    const objectFit = getComputedStyle(img).objectFit;
+    const elRect = thumbImg.getBoundingClientRect();
+    const objectFit = getComputedStyle(thumbImg).objectFit;
 
-    if (objectFit !== 'cover' || !img.naturalWidth || !img.naturalHeight) {
+    if (objectFit !== 'cover' || !thumbImg.naturalWidth || !thumbImg.naturalHeight) {
       return elRect;
     }
 
     // When object-fit: cover is used, the image is scaled up to fill the container
     // and cropped. Compute the virtual rect of the full uncropped image so the FLIP
     // animation origin has the correct aspect ratio (no jitter from crop mismatch).
-    const natRatio = img.naturalWidth / img.naturalHeight;
+    const natRatio = thumbImg.naturalWidth / thumbImg.naturalHeight;
     const elRatio = elRect.width / elRect.height;
 
     let renderedW: number, renderedH: number;
@@ -3546,7 +3549,7 @@ export class Lightbox {
     }
 
     // Parse object-position (default 50% 50%) to find crop offset
-    const pos = getComputedStyle(img).objectPosition || '50% 50%';
+    const pos = getComputedStyle(thumbImg).objectPosition || '50% 50%';
     const parts = pos.split(/\s+/);
     const px = parts[0]?.endsWith('%') ? parseFloat(parts[0]) / 100 : 0.5;
     const py = parts[1]?.endsWith('%') ? parseFloat(parts[1]) / 100 : 0.5;
@@ -3563,10 +3566,10 @@ export class Lightbox {
     targetRect: DOMRect,
   ): { top: number; right: number; bottom: number; left: number } {
     const zero = { top: 0, right: 0, bottom: 0, left: 0 };
-    const img = el.querySelector('img') as HTMLImageElement | null;
-    if (!img || getComputedStyle(img).objectFit !== 'cover') return zero;
+    const thumbImg = el.querySelector('img') as HTMLImageElement | null;
+    if (!thumbImg || getComputedStyle(thumbImg).objectFit !== 'cover') return zero;
 
-    const elRect = img.getBoundingClientRect();
+    const elRect = thumbImg.getBoundingClientRect();
 
     // Fraction of the virtual rect that is cropped on each side
     const topFrac = Math.max(0, elRect.top - virtualRect.top) / virtualRect.height;
@@ -3574,7 +3577,7 @@ export class Lightbox {
     const bottomFrac = Math.max(0, virtualRect.bottom - elRect.bottom) / virtualRect.height;
     const rightFrac = Math.max(0, virtualRect.right - elRect.right) / virtualRect.width;
 
-    // Convert to pixel insets in the lightbox image's coordinate space
+    // Convert to pixel insets in the lightbox media's coordinate space
     return {
       top: topFrac * targetRect.height,
       right: rightFrac * targetRect.width,
@@ -3584,7 +3587,7 @@ export class Lightbox {
   }
 
   /**
-   * Compute FLIP scale and crop insets for morphing between the lightbox image
+   * Compute FLIP scale and crop insets for morphing between the lightbox media
    * and a thumbnail. Handles both CSS object-fit:cover cropping and server-side
    * aspect ratio mismatches (e.g. Unsplash ?fit=crop).
    */
@@ -3609,7 +3612,7 @@ export class Lightbox {
     }
 
     // Check for aspect ratio mismatch (e.g. server-side crop produces different
-    // aspect ratio than the full-res image). When present, use Math.max (fill)
+    // aspect ratio than the full-res media). When present, use Math.max (fill)
     // instead of Math.min (fit) and clip the excess via clip-path.
     const morphRatio = morphRect.width / morphRect.height;
     const fitRatio = fitRect.width / fitRect.height;
@@ -3617,7 +3620,7 @@ export class Lightbox {
 
     if (!isTextLink && relDiff > 0.05) {
       const flipScale = Math.max(scaleX, scaleY);
-      // What portion of the local (pre-transform) image is visible after scaling
+      // What portion of the local (pre-transform) media is visible after scaling
       const visibleLocalW = morphRect.width / flipScale;
       const visibleLocalH = morphRect.height / flipScale;
       // Symmetric (centered) crop — matches the common center-crop default
@@ -3644,7 +3647,7 @@ export class Lightbox {
   private computeTargetRect(naturalWidth: number, naturalHeight: number): DOMRect {
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const p = this.getTargetImagePadding();
+    const p = this.getTargetMediaPadding();
     const scale = Math.min((vw - p * 2) / naturalWidth, (vh - p * 2) / naturalHeight, 1);
     const w = naturalWidth * scale;
     const h = naturalHeight * scale;
@@ -3652,29 +3655,29 @@ export class Lightbox {
   }
 
   /** Like computeTargetRect but without the scale ≤ 1 cap. Used when full-res
-   *  dimensions are unknown — fills the viewport based on aspect ratio alone. */
+   * dimensions are unknown — fills the viewport based on aspect ratio alone. */
   private computeTargetRectFromAspectRatio(width: number, height: number): DOMRect {
     const vw = window.innerWidth;
     const vh = window.innerHeight;
-    const p = this.getTargetImagePadding();
+    const p = this.getTargetMediaPadding();
     const scale = Math.min((vw - p * 2) / width, (vh - p * 2) / height);
     const w = width * scale;
     const h = height * scale;
     return new DOMRect((vw - w) / 2, (vh - h) / 2, w, h);
   }
 
-  private loadImage(src: string): Promise<{ width: number; height: number }> {
+  private loadMedia(src: string): Promise<{ width: number; height: number }> {
     const cached = this.preloadCache.get(src);
     if (cached?.complete && cached.naturalWidth > 0) {
       return Promise.resolve({ width: cached.naturalWidth, height: cached.naturalHeight });
     }
     return new Promise((resolve) => {
-      const img = cached || new Image();
-      img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
-      img.onerror = () => resolve({ width: 800, height: 600 });
+      const media = cached || new Image();
+      media.onload = () => resolve({ width: media.naturalWidth, height: media.naturalHeight });
+      media.onerror = () => resolve({ width: 800, height: 600 });
       if (!cached) {
-        img.src = src;
-        this.preloadCache.set(src, img);
+        media.src = src;
+        this.preloadCache.set(src, media);
       }
     });
   }
