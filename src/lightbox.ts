@@ -3,7 +3,7 @@ import type { SpringConfig, SpringState, SpringStepResult } from './physics/spri
 // Note: easing.ts is no longer used — all animations are rAF + spring physics
 
 // Prepare for other media types (video, 3D models, etc.)
-export type LightboxMediaElement = HTMLImageElement;
+export type LightboxMediaElement = HTMLImageElement | HTMLVideoElement;
 
 export type LightboxEventType =
   | 'open'
@@ -125,6 +125,7 @@ interface GalleryItem {
   thumbSrc: string;
   caption: string;
   alt: string;
+  type: 'image' | 'video';
 }
 
 interface SwipeNavState {
@@ -197,7 +198,7 @@ export class Lightbox {
   // Preload
   private preloadCache = new Map<string, LightboxMediaElement>();
   private preloadTimer: ReturnType<typeof setTimeout> | null = null;
-  private preloadQueue: string[] = [];
+  private preloadQueue: GalleryItem[] = [];
   private preloadingActive: boolean = false;
 
   // Velocity tracking
@@ -412,8 +413,9 @@ export class Lightbox {
     const trigger = e.target.closest(this.opts.selector) as HTMLElement | null;
     if (!trigger) return;
     const src = this.getSrcFromTrigger(trigger);
+    const type = this.inferMediaType(src, trigger);
     if (!src || this.preloadCache.has(src)) return;
-    this.preloadTimer = setTimeout(() => this.preloadImage(src), PRELOAD_DELAY);
+    this.preloadTimer = setTimeout(() => this.preloadMedia(src, type), PRELOAD_DELAY);
   }
 
   private handlePointerLeave(e: PointerEvent): void {
@@ -431,11 +433,19 @@ export class Lightbox {
     }
   }
 
-  private preloadImage(src: string): void {
+  private preloadMedia(src: string, type: 'image' | 'video'): void {
     if (this.preloadCache.has(src)) return;
-    const img = new Image();
-    img.src = src;
-    this.preloadCache.set(src, img);
+    let media: LightboxMediaElement;
+    if (type === 'video') {
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      v.muted = true; // Often required to preload without errors
+      media = v;
+    } else {
+      media = new Image();
+    }
+    media.src = src;
+    this.preloadCache.set(src, media);
   }
 
   // ─── Gallery preloading ─────────────────────────────────────
@@ -443,10 +453,12 @@ export class Lightbox {
   private schedulePreloads(): void {
     // Tier 1: always preload immediate neighbors
     if (this.currentIndex > 0) {
-      this.preloadImage(this.gallery[this.currentIndex - 1].src);
+      const prevItem = this.gallery[this.currentIndex - 1];
+      this.preloadMedia(prevItem.src, prevItem.type);
     }
     if (this.currentIndex < this.gallery.length - 1) {
-      this.preloadImage(this.gallery[this.currentIndex + 1].src);
+      const nextItem = this.gallery[this.currentIndex + 1];
+      this.preloadMedia(nextItem.src, nextItem.type);
     }
 
     // Tier 2+: after first navigation, preload remaining in travel direction
@@ -457,35 +469,53 @@ export class Lightbox {
 
   private enqueueRemainingPreloads(): void {
     // Build queue outward from current position
-    const queue: string[] = [];
+    const queue: GalleryItem[] = [];
     for (let offset = 2; offset < this.gallery.length; offset++) {
       const fwd = this.currentIndex + offset;
       const bwd = this.currentIndex - offset;
-      if (fwd < this.gallery.length) queue.push(this.gallery[fwd].src);
-      if (bwd >= 0) queue.push(this.gallery[bwd].src);
+      if (fwd < this.gallery.length) queue.push(this.gallery[fwd]);
+      if (bwd >= 0) queue.push(this.gallery[bwd]);
     }
-    this.preloadQueue = queue.filter((src) => !this.preloadCache.has(src));
+    this.preloadQueue = queue.filter((item) => !this.preloadCache.has(item.src));
     this.processPreloadQueue();
   }
 
   private processPreloadQueue(): void {
     if (this.preloadingActive || this.preloadQueue.length === 0) return;
-    const src = this.preloadQueue.shift()!;
-    if (this.preloadCache.has(src)) {
+    const item = this.preloadQueue.shift()!;
+    if (this.preloadCache.has(item.src)) {
       this.processPreloadQueue();
       return;
     }
     this.preloadingActive = true;
-    const img = new Image();
-    img.onload = img.onerror = () => {
+    let media: LightboxMediaElement;
+
+    const onLoad = () => {
       this.preloadingActive = false;
       this.processPreloadQueue();
     };
-    img.src = src;
-    this.preloadCache.set(src, img);
+
+    if (item.type === 'video') {
+      const v = document.createElement('video');
+      v.preload = 'metadata';
+      v.muted = true;
+      v.onloadedmetadata = v.onerror = onLoad;
+      media = v;
+    } else {
+      media = new Image();
+      media.onload = media.onerror = onLoad;
+    }
+    media.src = item.src;
+    this.preloadCache.set(item.src, media);
   }
 
   // ─── Gallery ────────────────────────────────────────────────
+
+  private inferMediaType(src: string, triggerEl: HTMLElement | null): 'image' | 'video' {
+    if (triggerEl?.getAttribute('data-type')?.toLowerCase() === 'video') return 'video';
+    if (/\.(mp4|webm|ogg|mov)(\?.*)?$/i.test(src)) return 'video';
+    return 'image';
+  }
 
   private buildGallery(triggerEl: HTMLElement): void {
     const galleryName = triggerEl.getAttribute('data-lightbox');
@@ -502,12 +532,14 @@ export class Lightbox {
     this.gallery = Array.from(elements).map((el) => {
       const htmlEl = el as HTMLElement;
       const img = htmlEl.querySelector('img') as HTMLImageElement | null;
+      const src = this.getSrcFromTrigger(htmlEl);
       return {
         triggerEl: htmlEl,
-        src: this.getSrcFromTrigger(htmlEl),
+        src,
         thumbSrc: img?.currentSrc || img?.src || '',
         caption: htmlEl.getAttribute('data-caption') || htmlEl.getAttribute('data-title') || '',
         alt: htmlEl.getAttribute('data-alt') || img?.alt || '',
+        type: this.inferMediaType(src, htmlEl),
       };
     });
 
@@ -616,6 +648,15 @@ export class Lightbox {
       this.bounceRafId = null;
     }
 
+    const item = this.gallery[this.currentIndex] ?? {
+      triggerEl: triggerEl || document.body,
+      src,
+      thumbSrc: triggerEl?.querySelector('img')?.currentSrc || triggerEl?.querySelector('img')?.src || '',
+      caption: triggerEl?.getAttribute('data-caption') || triggerEl?.getAttribute('data-title') || '',
+      alt: triggerEl?.getAttribute('data-alt') || triggerEl?.querySelector('img')?.alt || '',
+      type: this.inferMediaType(src, triggerEl || null)
+    };
+
     this.state.isOpen = true;
     this.state.isAnimating = true;
     this.state.triggerEl = triggerEl || null;
@@ -631,7 +672,7 @@ export class Lightbox {
 
     if (this.isTextLink) {
       this.thumbBorderRadius = 0;
-      this.openTextLink(triggerEl || null, src);
+      this.openTextLink(item);
       return;
     }
 
@@ -639,7 +680,7 @@ export class Lightbox {
     const thumbRect = this.getThumbRect(triggerEl!);
     this.thumbBorderRadius = this.getThumbBorderRadius(triggerEl!);
 
-    this.createOverlay(thumbSrc || src);
+    this.createOverlay(item);
     this.createChrome();
     this.computeChromeDrift(
       thumbRect.x + thumbRect.width / 2,
@@ -651,11 +692,11 @@ export class Lightbox {
     const thumbNatW = thumbImg!.naturalWidth || thumbRect.width;
     const thumbNatH = thumbImg!.naturalHeight || thumbRect.height;
 
-    const cached = this.preloadCache.get(src);
-    const fullResReady = cached?.complete && cached.naturalWidth > 0;
+    const cached = this.preloadCache.get(item.src);
+    const fullResReady = cached && isMediaReady(cached);
 
-    const natW = fullResReady ? cached!.naturalWidth : thumbNatW;
-    const natH = fullResReady ? cached!.naturalHeight : thumbNatH;
+    const natW = fullResReady ? getMediaWidth(cached!) : thumbNatW;
+    const natH = fullResReady ? getMediaHeight(cached!) : thumbNatH;
     // When full-res dimensions are unknown, use thumbnail aspect ratio to fill
     // the viewport. Without this, the "never upscale" cap in computeTargetRect
     // keeps the media at the thumbnail's small pixel size.
@@ -684,8 +725,8 @@ export class Lightbox {
     );
 
     // Start full-res load immediately so it continues regardless of animation interrupts
-    if (thumbSrc && thumbSrc !== src) {
-      this.swapToFullRes(src);
+    if (thumbSrc && thumbSrc !== item.src) {
+      this.swapToFullRes(item);
     }
 
     // Preload neighbor media BEFORE populating adjacent slides — this ensures
@@ -711,6 +752,9 @@ export class Lightbox {
         this.state.isAnimating = false;
         this.updateCursorState();
         this.emit('opened');
+        if (this.mediaEl instanceof HTMLVideoElement) {
+          this.mediaEl.play().catch(() => {});
+        }
       },
       undefined,
       undefined,
@@ -719,24 +763,24 @@ export class Lightbox {
     );
   }
 
-  private openTextLink(triggerEl: HTMLElement | null, src: string): void {
-    const cached = this.preloadCache.get(src);
-    const fullResReady = cached?.complete && cached.naturalWidth > 0;
+  private openTextLink(item: GalleryItem): void {
+    const cached = this.preloadCache.get(item.src);
+    const fullResReady = cached && isMediaReady(cached);
 
     if (fullResReady) {
       // Media already loaded — run the normal FLIP morph using media aspect ratio
-      this.openTextLinkWithMedia(triggerEl, src, cached!.naturalWidth, cached!.naturalHeight);
+      this.openTextLinkWithMedia(item, getMediaWidth(cached!), getMediaHeight(cached!));
       return;
     }
 
     // Media not ready — show overlay + spinner, load, then morph
-    this.createOverlay('');
+    this.createOverlay(item);
     this.createChrome();
-    const cx = triggerEl
-      ? triggerEl.getBoundingClientRect().x + triggerEl.getBoundingClientRect().width / 2
+    const cx = item.triggerEl && item.triggerEl !== document.body
+      ? item.triggerEl.getBoundingClientRect().x + item.triggerEl.getBoundingClientRect().width / 2
       : window.innerWidth / 2;
-    const cy = triggerEl
-      ? triggerEl.getBoundingClientRect().y + triggerEl.getBoundingClientRect().height / 2
+    const cy = item.triggerEl && item.triggerEl !== document.body
+      ? item.triggerEl.getBoundingClientRect().y + item.triggerEl.getBoundingClientRect().height / 2
       : window.innerHeight / 2;
     this.computeChromeDrift(cx, cy);
     document.addEventListener('keydown', this.handleKeydown);
@@ -744,7 +788,7 @@ export class Lightbox {
 
     // Show spinner after a short delay (skip if media loads fast)
     this.spinnerTimer = setTimeout(() => {
-      if (this.overlay && this.state.currentSrc === src) {
+      if (this.overlay && this.state.currentSrc === item.src) {
         const spinner = document.createElement('div');
         spinner.className = 'lightbox3-spinner';
         this.overlay.appendChild(spinner);
@@ -763,21 +807,21 @@ export class Lightbox {
     );
 
     // Load media, then run the FLIP morph
-    this.loadMedia(src).then((size) => {
-      if (!this.mediaEl || this.state.currentSrc !== src) return;
+    this.loadMedia(item).then((size) => {
+      if (!this.mediaEl || this.state.currentSrc !== item.src) return;
       if (this.state.isClosing || !this.state.isOpen) return;
       this.removeSpinner();
-      this.openTextLinkWithMedia(triggerEl, src, size.width, size.height);
+      this.openTextLinkWithMedia(item, size.width, size.height);
     });
   }
 
   /** Run the FLIP morph for a text-link trigger once media dimensions are known. */
   private openTextLinkWithMedia(
-    triggerEl: HTMLElement | null,
-    src: string,
+    item: GalleryItem,
     natW: number,
     natH: number,
   ): void {
+    const triggerEl = item.triggerEl !== document.body ? item.triggerEl : null;
     const thumbRect = triggerEl
       ? this.getThumbRect(triggerEl)
       : new DOMRect(window.innerWidth / 2, window.innerHeight / 2, 0, 0);
@@ -785,7 +829,7 @@ export class Lightbox {
 
     // If overlay wasn't created yet (preloaded path), create it now
     if (!this.overlay) {
-      this.createOverlay(src);
+      this.createOverlay(item);
       this.createChrome();
       this.computeChromeDrift(
         thumbRect.x + thumbRect.width / 2,
@@ -793,7 +837,11 @@ export class Lightbox {
       );
       document.addEventListener('keydown', this.handleKeydown);
     } else {
-      this.mediaEl!.src = src;
+      // It's already created, but if we haven't assigned src (e.g. text link with video without preloaded src)
+      const mediaSrc = this.mediaEl!.getAttribute('src') || this.mediaEl!.src;
+      if (!mediaSrc.endsWith(item.src)) {
+        this.mediaEl!.src = item.src;
+      }
     }
 
     this.positionMedia(targetRect);
@@ -823,6 +871,9 @@ export class Lightbox {
         this.state.isAnimating = false;
         this.updateCursorState();
         this.emit('opened');
+        if (this.mediaEl instanceof HTMLVideoElement) {
+          this.mediaEl.play().catch(() => {});
+        }
       },
       undefined,
       undefined,
@@ -855,13 +906,16 @@ export class Lightbox {
     }
   }
 
-  private swapToFullRes(src: string): void {
-    this.loadMedia(src).then((size) => {
-      if (!this.mediaEl || this.state.currentSrc !== src) return;
+  private swapToFullRes(item: GalleryItem): void {
+    this.loadMedia(item).then((size) => {
+      if (!this.mediaEl || this.state.currentSrc !== item.src) return;
       // Full-res loaded after close started — don't reposition the media
       if (this.state.isClosing || !this.state.isOpen) return;
 
-      this.mediaEl.src = src;
+      const mediaSrc = this.mediaEl.getAttribute('src') || this.mediaEl.src;
+      if (!mediaSrc.endsWith(item.src)) {
+        this.mediaEl.src = item.src;
+      }
       this.zoom.naturalWidth = size.width;
       this.zoom.naturalHeight = size.height;
 
@@ -958,6 +1012,10 @@ export class Lightbox {
   close(): void {
     if (this.state.isClosing) return;
     if (!this.state.isOpen && !this.state.isAnimating) return;
+
+    if (this.mediaEl instanceof HTMLVideoElement) {
+      this.mediaEl.pause();
+    }
 
     // If dismiss gesture is in progress, close from the current dismiss position
     if (this.dismiss.active) {
@@ -1190,7 +1248,7 @@ export class Lightbox {
   }
 
   private navigateTo(direction: 1 | -1): void {
-    this.debugLog(`navigateTo(${direction > 0 ? 'next' : 'prev'})`);
+    this.debugLog(`MapsTo(${direction > 0 ? 'next' : 'prev'})`);
     this.userHasNavigated = true;
     this.pendingNavDirection = direction;
 
@@ -1264,6 +1322,10 @@ export class Lightbox {
   private recycleSlots(direction: 1 | -1): void {
     const slideWidth = window.innerWidth + SLIDE_GAP;
 
+    if (this.mediaEl instanceof HTMLVideoElement) {
+      this.mediaEl.pause();
+    }
+
     if (direction === 1) {
       // Forward: prev is removed, current→prev, next→current, create new next
       if (this.prevSlideEl) this.prevSlideEl.remove();
@@ -1323,22 +1385,29 @@ export class Lightbox {
 
     // Check preload cache first
     const cached = this.preloadCache.get(item.src);
-    const fullResReady = cached?.complete && cached.naturalWidth > 0;
+    const fullResReady = cached && isMediaReady(cached);
 
     // Also check if the slide's media element already has full-res loaded
     // (e.g. preload finished during strip animation and upgraded the adjacent slide)
-    const mediaHasFullRes =
-      this.mediaEl.src === item.src &&
-      this.mediaEl.complete &&
-      this.mediaEl.naturalWidth > 0;
+    const mediaSrc = this.mediaEl.getAttribute('src') || this.mediaEl.src;
+    let mediaHasFullRes = false;
+
+    if (item.type === 'video') {
+      mediaHasFullRes = mediaSrc.endsWith(item.src) && (this.mediaEl as HTMLVideoElement).readyState >= 1;
+    } else {
+      mediaHasFullRes = mediaSrc.endsWith(item.src) && (this.mediaEl as HTMLImageElement).complete && getMediaWidth(this.mediaEl) > 0;
+    }
 
     if (fullResReady || mediaHasFullRes) {
-      const natW = fullResReady ? cached!.naturalWidth : this.mediaEl.naturalWidth;
-      const natH = fullResReady ? cached!.naturalHeight : this.mediaEl.naturalHeight;
+      const source = mediaHasFullRes ? this.mediaEl : cached!;
+      const natW = getMediaWidth(source);
+      const natH = getMediaHeight(source);
       this.zoom.naturalWidth = natW;
       this.zoom.naturalHeight = natH;
       this.zoom.fitRect = this.computeTargetRect(natW, natH);
-      this.mediaEl.src = item.src;
+      if (!mediaSrc.endsWith(item.src)) {
+        this.mediaEl.src = item.src;
+      }
       this.positionMedia(this.zoom.fitRect);
     } else {
       const thumbImg = item.triggerEl.querySelector('img') as HTMLImageElement | null;
@@ -1348,7 +1417,7 @@ export class Lightbox {
       this.zoom.naturalHeight = natH;
       this.zoom.fitRect = this.computeTargetRectFromAspectRatio(natW, natH);
       this.positionMedia(this.zoom.fitRect);
-      this.swapToFullRes(item.src);
+      this.swapToFullRes(item);
     }
 
     // Apply border-radius to the new current media (previous media had it from
@@ -1359,6 +1428,10 @@ export class Lightbox {
     }
 
     this.updateCursorState();
+
+    if (item.type === 'video' && this.mediaEl instanceof HTMLVideoElement) {
+      this.mediaEl.play().catch(() => {});
+    }
   }
 
   /**
@@ -2996,7 +3069,9 @@ export class Lightbox {
   private updateCursorState(): void {
     if (!this.mediaEl) return;
     const media = this.mediaEl;
-    if (this.zoom.isDragging) {
+    if (media instanceof HTMLVideoElement) {
+      media.style.cursor = 'auto'; // Prefer native controls appearance
+    } else if (this.zoom.isDragging) {
       media.style.cursor = 'grabbing';
     } else if (this.zoom.zoomed) {
       media.style.cursor = 'grab';
@@ -3107,15 +3182,6 @@ export class Lightbox {
       return this.gallery[this.currentIndex]?.caption || '';
     }
     return this.state.triggerEl?.getAttribute('data-caption') || this.state.triggerEl?.getAttribute('data-title') || '';
-  }
-
-  private getCurrentAlt(): string {
-    if (this.gallery.length > 0) {
-      return this.gallery[this.currentIndex]?.alt || '';
-    }
-    const triggerEl = this.state.triggerEl;
-    const img = triggerEl?.querySelector('img') as HTMLImageElement | null;
-    return triggerEl?.getAttribute('data-alt') || img?.alt || '';
   }
 
   private updateChromeContent(): void {
@@ -3308,7 +3374,7 @@ export class Lightbox {
 
   // ─── DOM ─────────────────────────────────────────────────────
 
-  private createOverlay(src: string): void {
+  private createOverlay(item: GalleryItem): void {
     const overlay = document.createElement('div');
     overlay.className = 'lightbox3-overlay';
     overlay.setAttribute('role', 'dialog');
@@ -3325,7 +3391,7 @@ export class Lightbox {
     strip.className = 'lightbox3-strip';
 
     // Center slide
-    const { slide, media } = this.createSlide(src, this.getCurrentAlt());
+    const { slide, media } = this.createSlide(item, false);
     slide.style.left = '0';
     slide.style.pointerEvents = 'auto';
 
@@ -3348,21 +3414,33 @@ export class Lightbox {
     this.mediaEl = media;
   }
 
-  private createSlide(src: string, alt = ''): { slide: HTMLDivElement; media: LightboxMediaElement } {
+  private createSlide(item: GalleryItem, lazySrc: boolean = false): { slide: HTMLDivElement; media: LightboxMediaElement } {
     const slide = document.createElement('div');
     slide.className = 'lightbox3-slide';
 
-    const media = document.createElement('img');
+    let media: LightboxMediaElement;
+    if (item.type === 'video') {
+      const v = document.createElement('video');
+      v.controls = true;
+      v.playsInline = true;
+      if (item.thumbSrc) v.poster = item.thumbSrc;
+      media = v;
+    } else {
+      media = document.createElement('img');
+    }
+
     media.className = 'lightbox3-media';
-    if (src) media.src = src;
-    media.alt = alt;
+    if (!lazySrc && item.src) media.src = item.src;
+    if (media instanceof HTMLImageElement) {
+      media.alt = item.alt;
+      media.addEventListener('click', (e) => this.handleMediaClick(e));
+      media.addEventListener('pointerdown', this.handleMediaPointerDown);
+      media.addEventListener('pointermove', this.handlePointerMove);
+      media.addEventListener('pointerup', this.handlePointerUp);
+      media.addEventListener('pointercancel', this.handlePointerUp);
+    }
     media.draggable = false;
 
-    media.addEventListener('click', (e) => this.handleMediaClick(e));
-    media.addEventListener('pointerdown', this.handleMediaPointerDown);
-    media.addEventListener('pointermove', this.handlePointerMove);
-    media.addEventListener('pointerup', this.handlePointerUp);
-    media.addEventListener('pointercancel', this.handlePointerUp);
 
     slide.appendChild(media);
     return { slide, media };
@@ -3374,7 +3452,7 @@ export class Lightbox {
     const item = this.gallery[galleryIndex];
     if (!item) return;
 
-    const { slide, media } = this.createSlide('', item.alt);
+    const { slide, media } = this.createSlide(item, true);
     slide.style.left = `${leftPosition}px`;
     slide.style.pointerEvents = 'none';
 
@@ -3397,14 +3475,22 @@ export class Lightbox {
     const br = this.getTargetBorderRadius();
     media.style.borderRadius = br > 0 ? `${br}px` : '';
     const cached = this.preloadCache.get(item.src);
-    const fullResReady = cached?.complete && cached.naturalWidth > 0;
+    const fullResReady = cached && isMediaReady(cached);
 
     if (fullResReady) {
-      media.src = item.src;
-      const rect = this.computeTargetRect(cached!.naturalWidth, cached!.naturalHeight);
+      if (item.type !== 'video' || media.getAttribute('src') !== item.src) {
+        media.src = item.src;
+      }
+      const rect = this.computeTargetRect(getMediaWidth(cached!), getMediaHeight(cached!));
       this.positionMediaEl(media, rect);
     } else {
-      media.src = item.thumbSrc || item.src;
+      if (item.type === 'video') {
+        media.src = item.src;
+        (media as HTMLVideoElement).preload = 'metadata';
+      } else {
+        media.src = item.thumbSrc || item.src;
+      }
+
       const thumbImg = item.triggerEl.querySelector('img') as HTMLImageElement | null;
       const natW = thumbImg?.naturalWidth || 400;
       const natH = thumbImg?.naturalHeight || 300;
@@ -3412,21 +3498,22 @@ export class Lightbox {
       this.positionMediaEl(media, rect);
 
       // If preload is in progress, upgrade this slide as soon as it completes
-      if (cached && !cached.complete) {
+      if (cached && !isMediaReady(cached)) {
+        const eventName = item.type === 'video' ? 'loadedmetadata' : 'load';
         const onLoad = () => {
-          cached.removeEventListener('load', onLoad);
+          cached.removeEventListener(eventName, onLoad);
           if (this.state.isClosing || !this.state.isOpen) return;
           // Only upgrade if this media is still an adjacent slide (not yet current)
           if (
             (media === this.prevSlideMedia || media === this.nextSlideMedia) &&
-            cached.naturalWidth > 0
+            getMediaWidth(cached) > 0
           ) {
-            media.src = item.src;
-            const fullRect = this.computeTargetRect(cached.naturalWidth, cached.naturalHeight);
+            if (item.type !== 'video') media.src = item.src;
+            const fullRect = this.computeTargetRect(getMediaWidth(cached), getMediaHeight(cached));
             this.positionMediaEl(media, fullRect);
           }
         };
-        cached.addEventListener('load', onLoad);
+        cached.addEventListener(eventName, onLoad);
       }
     }
   }
@@ -3666,18 +3753,37 @@ export class Lightbox {
     return new DOMRect((vw - w) / 2, (vh - h) / 2, w, h);
   }
 
-  private loadMedia(src: string): Promise<{ width: number; height: number }> {
-    const cached = this.preloadCache.get(src);
-    if (cached?.complete && cached.naturalWidth > 0) {
-      return Promise.resolve({ width: cached.naturalWidth, height: cached.naturalHeight });
+  private loadMedia(item: GalleryItem): Promise<{ width: number; height: number }> {
+    const cached = this.preloadCache.get(item.src);
+    if (cached && isMediaReady(cached)) {
+      return Promise.resolve({ width: getMediaWidth(cached), height: getMediaHeight(cached) });
     }
     return new Promise((resolve) => {
-      const media = cached || new Image();
-      media.onload = () => resolve({ width: media.naturalWidth, height: media.naturalHeight });
-      media.onerror = () => resolve({ width: 800, height: 600 });
+      let media = cached;
+      if (!media) {
+        if (item.type === 'video') {
+          const v = document.createElement('video');
+          v.preload = 'metadata';
+          v.muted = true;
+          media = v;
+        } else {
+          media = new Image();
+        }
+      }
+
+      if (item.type === 'video') {
+        const v = media as HTMLVideoElement;
+        v.onloadedmetadata = () => resolve({ width: v.videoWidth, height: v.videoHeight });
+        v.onerror = () => resolve({ width: 800, height: 600 });
+      } else {
+        const img = media as HTMLImageElement;
+        img.onload = () => resolve({ width: img.naturalWidth, height: img.naturalHeight });
+        img.onerror = () => resolve({ width: 800, height: 600 });
+      }
+      
       if (!cached) {
-        media.src = src;
-        this.preloadCache.set(src, media);
+        media.src = item.src;
+        this.preloadCache.set(item.src, media);
       }
     });
   }
@@ -3829,8 +3935,8 @@ export class Lightbox {
         const marker = isCurrent ? '▸' : ' ';
 
         let status: string;
-        if (cached?.complete && cached.naturalWidth > 0) {
-          status = `● ${cached.naturalWidth}×${cached.naturalHeight}`;
+        if (cached && isMediaReady(cached)) {
+          status = `● ${getMediaWidth(cached)}×${getMediaHeight(cached)}`;
         } else if (cached) {
           status = '◐ loading';
         } else {
@@ -3858,4 +3964,18 @@ function rubberBand(value: number, min: number, max: number): number {
   if (value < min) return min - (min - value) * RUBBER_BAND_FACTOR;
   if (value > max) return max + (value - max) * RUBBER_BAND_FACTOR;
   return value;
+}
+
+function isMediaReady(media: LightboxMediaElement): boolean {
+  if (media instanceof HTMLImageElement) return media.complete && media.naturalWidth > 0;
+  if (media instanceof HTMLVideoElement) return media.readyState >= 1 && media.videoWidth > 0;
+  return false;
+}
+
+function getMediaWidth(media: LightboxMediaElement): number {
+  return media instanceof HTMLImageElement ? media.naturalWidth : media.videoWidth;
+}
+
+function getMediaHeight(media: LightboxMediaElement): number {
+  return media instanceof HTMLImageElement ? media.naturalHeight : media.videoHeight;
 }
